@@ -1,0 +1,26 @@
+.DS_Store
+.AppleDouble
+xcuserdata/
+*.xcuserstate
+DerivedData/
+.build/
+Build/
+build/
+*.app/
+*.dSYM/
+*.xcarchive/
+*.caf
+*.log
+CurrentEdit.json
+.env
+.env.*
+*.p12
+*.p8
+*.mobileprovision
+Tests/
+Scripts/
+*.dmg
+*.pkg
+/RELEASE.md
+/ripple demo.mov
+*.zip
