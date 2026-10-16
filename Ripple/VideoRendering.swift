@@ -3,12 +3,18 @@ import Foundation
 import CoreImage
 
 enum VideoRendering {
-    static func composition(asset: AVAsset, info: VideoInfo, effects: [ClickEffect]) async throws -> AVMutableVideoComposition {
+    static func composition(asset: AVAsset, info: VideoInfo, effects: [ClickEffect], glassEffects: [GlassEffect] = [], plan: TimelinePlan? = nil) async throws -> AVMutableVideoComposition {
+        if !glassEffects.isEmpty { try GlassRenderer.validate() }
+        let timeline = plan ?? TimelinePlan(sourceDuration: info.duration, effects: glassEffects)
         let context = Ripple.makeContext()
         let bounds = CGRect(origin: .zero, size: info.size)
         let composition: AVMutableVideoComposition = try await withCheckedThrowingContinuation { continuation in
             AVMutableVideoComposition.videoComposition(with: asset, applyingCIFiltersWithHandler: { request in
-                let image = Ripple.composite(over: request.sourceImage, at: request.compositionTime.seconds, effects: effects, size: info.size)
+                let outputTime = request.compositionTime.seconds
+                var image = Ripple.composite(over: request.sourceImage, at: timeline.sourceTime(at: outputTime), effects: effects, size: info.size)
+                if let span = timeline.activeSpan(at: outputTime), let effect = glassEffects.first(where: { $0.id == span.id }) {
+                    image = GlassRenderer.composite(over: image, effect: effect, elapsed: outputTime - span.outputStart, size: info.size)
+                }
                 request.finish(with: image.cropped(to: bounds), context: context)
             }, completionHandler: { result, error in
                 if let result { continuation.resume(returning: result) }

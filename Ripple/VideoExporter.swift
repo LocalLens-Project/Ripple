@@ -41,10 +41,10 @@ private final class ExportPipeline: @unchecked Sendable {
     let videoIn: AVAssetWriterInput
     let videoOut: AVAssetReaderVideoCompositionOutput
     let adapter: AVAssetWriterInputPixelBufferAdaptor
-    let audio: [(AVAssetReaderTrackOutput, AVAssetWriterInput)]
+    let audio: [(AVAssetReaderOutput, AVAssetWriterInput)]
     init(reader: AVAssetReader, writer: AVAssetWriter, videoIn: AVAssetWriterInput,
          videoOut: AVAssetReaderVideoCompositionOutput, adapter: AVAssetWriterInputPixelBufferAdaptor,
-         audio: [(AVAssetReaderTrackOutput, AVAssetWriterInput)]) {
+         audio: [(AVAssetReaderOutput, AVAssetWriterInput)]) {
         self.reader = reader; self.writer = writer; self.videoIn = videoIn
         self.videoOut = videoOut; self.adapter = adapter; self.audio = audio
     }
@@ -59,14 +59,17 @@ final class VideoExporter: @unchecked Sendable {
     private func fail(_ error: Error) { lock.lock(); if firstError == nil { firstError = error }; lock.unlock() }
     private func recordedError() -> Error? { lock.lock(); defer { lock.unlock() }; return firstError }
 
-    func export(source: URL, to destination: URL, effects: [ClickEffect], progress: @escaping @Sendable (Double) -> Void) async throws {
-        let asset = AVURLAsset(url: source)
-        let info = try await VideoInfo.load(asset)
+    func export(source: URL, to destination: URL, effects: [ClickEffect], glassEffects: [GlassEffect] = [], progress: @escaping @Sendable (Double) -> Void) async throws {
+        let original = AVURLAsset(url: source)
+        let info = try await VideoInfo.load(original)
+        let prepared = try await VideoTimeline.prepare(asset: original, info: info, glassEffects: glassEffects)
+        let asset = prepared.asset
+        let duration = prepared.plan.duration
         let videoTrack = try await asset.loadTracks(withMediaType: .video).first!
         let audioTracks = try await asset.loadTracks(withMediaType: .audio)
         let reader = try AVAssetReader(asset: asset)
         let videoOut = AVAssetReaderVideoCompositionOutput(videoTracks: [videoTrack], videoSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
-        videoOut.videoComposition = try await VideoRendering.composition(asset: asset, info: info, effects: effects)
+        videoOut.videoComposition = try await VideoRendering.composition(asset: asset, info: info, effects: effects, glassEffects: glassEffects, plan: prepared.plan)
         videoOut.alwaysCopiesSampleData = false
         guard reader.canAdd(videoOut) else { throw ExportError.message(L10n.text("无法读取视频。", "Unable to read the video.")) }
         reader.add(videoOut)
@@ -92,11 +95,21 @@ final class VideoExporter: @unchecked Sendable {
             kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height,
             kCVPixelBufferIOSurfacePropertiesKey as String: [:]
         ])
-        var audioPairs: [(AVAssetReaderTrackOutput, AVAssetWriterInput)] = []
+        var audioPairs: [(AVAssetReaderOutput, AVAssetWriterInput)] = []
         for track in audioTracks {
-            let out = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
             let formats = try await track.load(.formatDescriptions)
-            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: formats.first)
+            let out: AVAssetReaderOutput
+            let input: AVAssetWriterInput
+            if glassEffects.isEmpty {
+                out = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+                input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: formats.first)
+            } else {
+                let format = formats.first.flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee }
+                let channels = Int(format?.mChannelsPerFrame ?? 2)
+                let sampleRate = format?.mSampleRate ?? 48000
+                out = AVAssetReaderAudioMixOutput(audioTracks: [track], audioSettings: [AVFormatIDKey: kAudioFormatLinearPCM, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsNonInterleaved: false])
+                input = AVAssetWriterInput(mediaType: .audio, outputSettings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVNumberOfChannelsKey: channels, AVSampleRateKey: sampleRate, AVEncoderBitRateKey: min(320000, 96000 * channels)])
+            }
             guard reader.canAdd(out), writer.canAdd(input) else { throw ExportError.message(L10n.text("无法保留这个视频的音轨。", "Unable to preserve this video’s audio tracks.")) }
             reader.add(out); writer.add(input); audioPairs.append((out, input))
         }
@@ -126,7 +139,7 @@ final class VideoExporter: @unchecked Sendable {
                         guard let pixel = CMSampleBufferGetImageBuffer(sample) else { throw ExportError.message(L10n.text("无法读取渲染帧。", "Unable to read a rendered frame.")) }
                         let timestamp = CMSampleBufferGetPresentationTimeStamp(sample)
                         guard pipeline.adapter.append(pixel, withPresentationTime: timestamp) else { throw pipeline.writer.error ?? ExportError.message(L10n.text("写入视频帧失败。", "Unable to write a video frame.")) }
-                        progress(min(0.99, timestamp.seconds/info.duration))
+                        progress(min(0.99, timestamp.seconds/duration))
                     } catch { fail(error) }
                 }
             }
@@ -152,7 +165,7 @@ final class VideoExporter: @unchecked Sendable {
         if let error = recordedError() { throw error }
         if shouldStop { throw CancellationError() }
         if reader.status == .failed { throw reader.error ?? ExportError.message(L10n.text("读取视频失败。", "Unable to read the video.")) }
-        writer.endSession(atSourceTime: CMTime(seconds: info.duration, preferredTimescale: 60000))
+        writer.endSession(atSourceTime: CMTime(seconds: duration, preferredTimescale: 60000))
         await writer.finishWriting()
         guard writer.status == .completed else { throw writer.error ?? ExportError.message(L10n.text("导出未完成。", "The export did not complete.")) }
         success = true

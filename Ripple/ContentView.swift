@@ -8,7 +8,17 @@ private let panelColor = Color(red: 0.105, green: 0.115, blue: 0.135)
 
 struct ContentView: View {
     @StateObject private var model = EditorModel()
+    @EnvironmentObject private var settings: WorkspaceSettings
     var body: some View {
+        Group {
+            if settings.mode == nil { ModeSelectionView() }
+            else { editor }
+        }
+        .task { _ = await model.restoreDraft() }
+        .onDisappear { model.cleanup() }
+    }
+
+    private var editor: some View {
         VStack(spacing: 0) {
             toolbar
             Divider().opacity(0.5)
@@ -17,12 +27,14 @@ struct ContentView: View {
                     if let info = model.info {
                         preview(info: info)
                         transport
-                        timeline
+                        if settings.mode == .glass { GlassTimeline(model: model) }
+                        else { timeline }
                     } else { welcome }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 if model.info != nil {
                     Divider().opacity(0.5)
-                    inspector.frame(width: 284)
+                    if settings.mode == .glass { GlassInspector(model: model).frame(width: 300) }
+                    else { inspector.frame(width: 284) }
                 }
             }
             if model.isExporting {
@@ -41,18 +53,21 @@ struct ContentView: View {
         .alert(L10n.text("未能完成", "Unable to complete"), isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button(L10n.text("好", "OK"), role: .cancel) { model.error = nil }
         } message: { Text(model.error ?? "") }
-        .onDisappear { model.cleanup() }
-        .task { _ = await model.restoreDraft() }
+
     }
 
     private var toolbar: some View {
         HStack(spacing: 12) {
-            Image(systemName: "circle.circle").font(.system(size: 23, weight: .light)).foregroundStyle(accent)
+            Image(systemName: settings.mode == .glass ? "rectangle.on.rectangle" : "circle.circle").font(.system(size: 23, weight: .light)).foregroundStyle(accent)
             VStack(alignment: .leading, spacing: 2) {
-                Text(L10n.appName).font(.system(size: 15, weight: .semibold))
-                Text(model.info == nil ? L10n.text("给视频加一个轻盈的点击提示", "Add a gentle click cue to your video") : model.filename).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                Text(L10n.appName + " · " + (settings.mode?.title ?? "")).font(.system(size: 15, weight: .semibold))
+                Text(model.info == nil ? (settings.mode == .glass ? L10n.text("定格重点，添加玻璃放大", "Freeze a detail and magnify it in glass") : L10n.text("给视频加一个轻盈的点击提示", "Add a gentle click cue to your video")) : model.filename).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
+            if model.isPreparing { ProgressView().controlSize(.small).help(L10n.text("正在更新预览…", "Updating preview…")) }
+            SettingsLink { Image(systemName: "gearshape") }
+                .buttonStyle(.plain).help(L10n.text("设置与模式切换", "Settings and editing mode"))
+                .accessibilityLabel(L10n.text("设置", "Settings"))
             if model.exportedURL != nil {
                 Button { model.revealExport() } label: { Label(L10n.text("导出完成 · 在 Finder 显示", "Exported · Show in Finder"), systemImage: "checkmark.circle.fill") }
                     .foregroundStyle(.green).buttonStyle(.plain)
@@ -76,8 +91,8 @@ struct ContentView: View {
                     if let state = Ripple.state(at: time, effect: effect) { drawRing(context: &context, size: size, effect: effect, state: state) }
                 }
             }.frame(width: 150, height: 150)
-            Text(L10n.text("让每一次点击，都看得见。", "Make every click visible.")).font(.system(size: 26, weight: .medium))
-            Text(L10n.text("导入视频，点选位置。呼吸节奏自动完成。", "Import a video and pick a spot. Breathing timing is automatic."))
+            Text(settings.mode == .glass ? L10n.text("让画面中的重点，浮起来。", "Bring the details forward.") : L10n.text("让每一次点击，都看得见。", "Make every click visible.")).font(.system(size: 26, weight: .medium))
+            Text(settings.mode == .glass ? L10n.text("导入视频，框选区域。定格与玻璃动画自动完成。", "Import a video and draw a region. Freeze timing and glass motion are automatic.") : L10n.text("导入视频，点选位置。呼吸节奏自动完成。", "Import a video and pick a spot. Breathing timing is automatic."))
                 .font(.system(size: 14)).foregroundStyle(.secondary)
             Button(L10n.text("选择视频…", "Choose a video…")) { model.openVideo() }.buttonStyle(PrimaryActionStyle()).padding(.top, 6)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -91,6 +106,9 @@ struct ContentView: View {
                 Color.black.opacity(0.12)
                 ZStack {
                     PlayerSurface(player: model.player)
+                    if settings.mode == .glass {
+                        GlassSelectionOverlay(model: model, size: size)
+                    } else {
                     if let effect = model.selected {
                         Image(systemName: "plus").font(.system(size: 12, weight: .light)).foregroundStyle(accent)
                             .padding(6).background(.black.opacity(0.35), in: Circle())
@@ -107,8 +125,9 @@ struct ContentView: View {
                             model.pause()
                             model.updateSelected { $0.x = value.location.x/size.width; $0.y = value.location.y/size.height }
                         })
+                    }
                 }.frame(width: size.width, height: size.height).clipped().shadow(color: .black.opacity(0.3), radius: 16, y: 5)
-                VStack { Spacer(); Text(model.selected == nil ? L10n.text("点击画面，添加圆环", "Click the video to add a ring") : L10n.text("点击添加新圆环 · 拖动调整选中圆环的位置", "Click to add a ring · Drag to move the selected ring"))
+                VStack { Spacer(); Text(settings.mode == .glass ? L10n.text("拖动框选区域 · 拖动选框移动 · 拖动四角调整大小", "Draw a region · Drag the selection to move · Drag corners to resize") : (model.selected == nil ? L10n.text("点击画面，添加圆环", "Click the video to add a ring") : L10n.text("点击添加新圆环 · 拖动调整选中圆环的位置", "Click to add a ring · Drag to move the selected ring")))
                         .font(.system(size: 11)).foregroundStyle(.secondary).padding(.bottom, 8) }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -119,7 +138,10 @@ struct ContentView: View {
             Button { model.step(-1) } label: { Image(systemName: "backward.end.fill") }.help(L10n.text("上一帧", "Previous frame"))
             Button { model.togglePlayback() } label: { Image(systemName: model.isPlaying ? "pause.fill" : "play.fill").frame(width: 20) }.keyboardShortcut(.space, modifiers: [])
             Button { model.step(1) } label: { Image(systemName: "forward.end.fill") }.help(L10n.text("下一帧", "Next frame"))
-            Text(String(format: "%06.2f / %06.2f s", model.currentTime, model.info?.duration ?? 0)).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
+            Text(String(format: "%06.2f / %06.2f s", model.currentTime, model.outputDuration)).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
+            if !model.glassEffects.isEmpty {
+                Text(L10n.text("原片 ", "Source ") + L10n.seconds(model.sourceTime)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+            }
             Spacer()
             if let info = model.info {
                 Text("\(Int(info.size.width)) × \(Int(info.size.height))  ·  \(String(format: "%.2f", info.fps)) fps")
@@ -130,19 +152,19 @@ struct ContentView: View {
 
     private var timeline: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Slider(value: Binding(get: { model.currentTime }, set: { model.pause(); model.seek($0) }), in: 0...max(0.001, model.info?.duration ?? 1)).tint(accent)
+            Slider(value: Binding(get: { model.currentTime }, set: { model.pause(); model.seek($0) }), in: 0...max(0.001, model.outputDuration)).tint(accent)
                 .accessibilityLabel(L10n.text("视频时间", "Video time"))
             GeometryReader { proxy in
                 ZStack(alignment: .topLeading) {
                     RoundedRectangle(cornerRadius: 5).fill(.white.opacity(0.045))
                     ForEach(Array(model.effects.enumerated()), id: \.element.id) { index, effect in
-                        let total = max(0.001, model.info?.duration ?? 1)
+                        let total = max(0.001, model.outputDuration)
                         EffectTimelineBar(model: model, effect: effect, index: index, trackWidth: proxy.size.width, totalDuration: total)
-                            .frame(width: max(8, proxy.size.width*effect.duration/total), height: 25)
-                            .offset(x: proxy.size.width*effect.start/total, y: CGFloat(index%2)*8+3)
+                            .frame(width: max(8, proxy.size.width*(model.plan.outputTime(for: effect.start + effect.duration) - model.plan.outputTime(for: effect.start))/total), height: 25)
+                            .offset(x: proxy.size.width*model.plan.outputTime(for: effect.start)/total, y: CGFloat(index%2)*8+3)
                             .zIndex(effect.id == model.selectedID ? 1 : 0)
                     }
-                    Rectangle().fill(.white.opacity(0.8)).frame(width: 1).offset(x: proxy.size.width*model.currentTime/max(0.001, model.info?.duration ?? 1))
+                    Rectangle().fill(.white.opacity(0.8)).frame(width: 1).offset(x: proxy.size.width*model.currentTime/max(0.001, model.outputDuration))
                         .allowsHitTesting(false)
                 }.coordinateSpace(name: "effectTrack").clipped()
             }.frame(height: 42)
@@ -152,6 +174,16 @@ struct ContentView: View {
                 Button { model.add() } label: { Label(L10n.text("在当前时间添加", "Add at current time"), systemImage: "plus.circle") }
             }.font(.system(size: 11)).buttonStyle(.plain)
         }.padding(.horizontal, 24).padding(.bottom, 22).disabled(model.busy)
+    }
+
+    private var exportNote: String {
+        if !model.glassEffects.isEmpty {
+            return L10n.text("包含新增定格片段，结束后音画同步继续。\n动画至少 60 fps，预览与导出共用渲染器。", "Includes added freeze segments; video and audio resume together.\nAnimation renders at 60 fps or higher, using the same renderer as the preview.")
+        }
+        if model.info?.isHDR == true {
+            return L10n.text("此视频为 HDR；当前导出为 SDR，保留原像素尺寸与时长。", "This is HDR video. Export uses SDR with the original dimensions and duration.")
+        }
+        return L10n.text("原像素尺寸、原时长和音轨。\n动画至少 60 fps，预览与导出共用渲染器。", "Original dimensions, duration and audio.\nAnimation renders at 60 fps or higher, using the same renderer as the preview.")
     }
 
     private var inspector: some View {
@@ -225,8 +257,10 @@ struct ContentView: View {
             Spacer(minLength: 0)
             VStack(alignment: .leading, spacing: 6) {
                 Label(L10n.text("原始分辨率导出", "Export at original resolution"), systemImage: "checkmark.shield").font(.system(size: 11, weight: .medium))
-                Text(model.info?.isHDR == true ? L10n.text("此视频为 HDR；当前导出为 SDR，保留原像素尺寸与时长。", "This is HDR video. Export uses SDR with the original dimensions and duration.") : L10n.text("原像素尺寸、原时长和音轨。\n动画至少 60 fps，预览与导出共用渲染器。", "Original dimensions, duration and audio.\nAnimation renders at 60 fps or higher, using the same renderer as the preview."))
+                Text(exportNote)
                     .font(.system(size: 10)).foregroundStyle(.secondary).lineSpacing(3)
+                Divider().padding(.vertical, 4)
+                RepositoryLink()
             }.padding(20)
         }.background(panelColor).disabled(model.busy)
     }
@@ -285,7 +319,7 @@ private struct EffectTimelineBar: View {
             .onTapGesture { model.select(effect) }
             .gesture(DragGesture(minimumDistance: 3, coordinateSpace: .named("effectTrack"))
                 .onChanged { value in
-                    if dragStart == nil { dragStart = effect.start }
+                    if dragStart == nil { dragStart = model.plan.outputTime(for: effect.start) }
                     move(value.translation.width)
                 }
                 .onEnded { value in
@@ -302,7 +336,7 @@ private struct EffectTimelineBar: View {
 
     private func move(_ translation: CGFloat) {
         guard let dragStart, trackWidth > 0 else { return }
-        model.moveEffect(id: effect.id, to: dragStart + Double(translation/trackWidth)*totalDuration)
+        model.moveRingOnTimeline(id: effect.id, to: dragStart + Double(translation/trackWidth)*totalDuration)
     }
 }
 
